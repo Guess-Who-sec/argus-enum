@@ -293,3 +293,5 @@ Pull requests are welcome. For major changes, please open an issue first.
 If you add new service enumeration modules or port mappings, follow the existing patterns in the `PORT_SCRIPTS` and `SERVICE_HINTS` arrays.
 
 ---
+
+Named after Argus Panoptes — the hundred-eyed giant of Greek mythology. All-seeing. Nothing escapes.
