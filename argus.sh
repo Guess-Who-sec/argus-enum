@@ -26,6 +26,10 @@ TARGET=""; PORTS=""; NO_VULN=0; NO_HPING=0; NO_ENUM=0; ADD_HOSTS=0
 TIMING="4"; OUTPUT=""; VERBOSE=0; NO_UDP=0; DO_SEARCHSPLOIT=0
 CRED_USER=""; CRED_PASS=""
 
+# ── Per-host cache (populated during display, reused in summary) ──────────────
+declare -A HOST_RESOLVED_OS
+declare -A HOST_RESOLVED_NAME
+
 # ── Vulnerability scripts per port ────────────────────────────────────────────
 declare -A PORT_SCRIPTS
 PORT_SCRIPTS[21]="ftp-anon,ftp-bounce,ftp-vsftpd-backdoor,ftp-proftpd-backdoor,ftp-libopie"
@@ -438,19 +442,42 @@ extract_scripts() {
 # ── Extract best hostname from all scan sources ───────────────────────────────
 get_best_hostname() {
     local ip="$1"
+
+    # 1. nmap PTR record from grepable output
     local h; h=$(get_hostname "$ip")
     [[ -n "$h" ]] && echo "$h" && return
-    local cn
-    cn=$(awk -v ip="$ip" '
-        /Nmap scan report for / { in_host=($0 ~ ip)?1:0 }
-        in_host && /commonName=/ {
-            match($0,/commonName=([^ ,\/]+)/,a)
-            if (a[1]!="" && a[1]!~/^\*/) { print a[1]; exit }
-        }
-    ' "$NMAP_N" 2>/dev/null | head -1)
+
+    # Helper: search a nmap normal file for commonName and DNS SAN
+    _cn_from_file() {
+        local f="$1"
+        [[ ! -f "$f" ]] && return
+        awk -v ip="$ip" '
+            /Nmap scan report for / { in_host=($0 ~ ip)?1:0 }
+            in_host && /commonName=/ {
+                match($0,/commonName=([^ ,\/]+)/,a)
+                if (a[1]!="" && a[1]!~/^\*/ && a[1]~/\./) { print a[1]; exit }
+            }
+            in_host && /DNS:/ {
+                match($0,/DNS:([^ ,]+)/,a)
+                if (a[1]!="" && a[1]!~/^\*/ && a[1]~/\./) { print a[1]; exit }
+            }
+        ' "$f" 2>/dev/null | head -1
+    }
+
+    # 2. Phase 1 nmap normal output
+    local cn; cn=$(_cn_from_file "$NMAP_N")
     [[ -n "$cn" ]] && echo "$cn" && return
-    grep -i "Computer name:" "$NMAP_N" 2>/dev/null \
-        | grep -oP '(?<=Computer name: )\S+' | head -1
+
+    # 3. Phase 2 vuln script output for this IP
+    local vuln_file="$SCAN_TMP/vuln_${ip//./_}.nmap"
+    cn=$(_cn_from_file "$vuln_file")
+    [[ -n "$cn" ]] && echo "$cn" && return
+
+    # 4. SMB computer name
+    local smb_name
+    smb_name=$(grep -i "Computer name:" "$NMAP_N" "$vuln_file" 2>/dev/null \
+        | grep -oP '(?<=Computer name: )\S+' | head -1)
+    [[ -n "$smb_name" ]] && echo "$smb_name" && return
 }
 
 # ── Add IP + hostname to /etc/hosts ──────────────────────────────────────────
@@ -1244,13 +1271,39 @@ display_host() {
     local hostname os_raw hping_data=""
     local hping_os_guess=""
 
-    hostname=$(get_hostname "$ip")
     os_raw=$(get_os_info "$ip")
+
+    # ── Resolve hostname from all available sources ───────────────────────────
+    local hostname
+    hostname=$(get_best_hostname "$ip")
+
+    # Fallback 1: reverse DNS via dig/host
+    if [[ -z "$hostname" ]]; then
+        if command -v dig &>/dev/null; then
+            hostname=$(dig -x "$ip" +short 2>/dev/null | sed 's/\.$//' | head -1)
+        elif command -v host &>/dev/null; then
+            hostname=$(host "$ip" 2>/dev/null | grep -oP '(?<=pointer ).*' | sed 's/\.$//' | head -1)
+        fi
+    fi
+
+    # Fallback 2: NetBIOS name via nmblookup
+    if [[ -z "$hostname" ]] && command -v nmblookup &>/dev/null; then
+        hostname=$(nmblookup -A "$ip" 2>/dev/null \
+            | grep -v "^Looking\|MSBROWSE\|__MSBROWSE\|<GROUP>\|MAC Address" \
+            | grep "<00>" | head -1 | awk '{print $1}')
+    fi
+
+    # ── Cache hostname ────────────────────────────────────────────────────────
+    HOST_RESOLVED_NAME[$ip]="${hostname}"
 
     # ── Host header ──────────────────────────────────────────────────────────
     rprint ""
     sep2
-    rprint "  HOST     : ${ip}$( [[ -n "$hostname" ]] && echo "  ($hostname)" )"
+    if [[ -n "$hostname" ]]; then
+        rprint "  HOST     : ${ip}  (${hostname})"
+    else
+        rprint "  HOST     : ${ip}"
+    fi
 
     # ── hping3 ────────────────────────────────────────────────────────────────
     if [[ $HPING_OK -eq 1 ]]; then
@@ -1263,15 +1316,18 @@ display_host() {
     fi
 
     # ── OS detection ──────────────────────────────────────────────────────────
+    local resolved_os=""
     if [[ -n "$os_raw" ]]; then
-        local os_top
-        os_top=$(echo "$os_raw" | cut -d',' -f1)
-        rprint "  OS       : ${os_top}"
+        resolved_os=$(echo "$os_raw" | cut -d',' -f1)
+        rprint "  OS       : ${resolved_os}"
     elif [[ -n "$hping_os_guess" ]] && [[ "$hping_os_guess" != "Unknown" ]]; then
-        rprint "  OS       : ${hping_os_guess} (hping3 TTL guess)"
+        resolved_os="${hping_os_guess} (TTL guess)"
+        rprint "  OS       : ${resolved_os}"
     else
-        rprint "  OS       : could not determine"
+        resolved_os="could not determine"
+        rprint "  OS       : ${resolved_os}"
     fi
+    HOST_RESOLVED_OS[$ip]="${resolved_os}"
 
     # ── TCP Port table ────────────────────────────────────────────────────────
     rprint ""
@@ -1411,12 +1467,10 @@ display_summary() {
         [[ -z "$ip" ]] && continue
         ((total_hosts++))
 
-        local hostname os_raw open_count=0
-        hostname=$(get_hostname "$ip")
-        os_raw=$(get_os_info "$ip")
-        local os_top="${os_raw:-(unknown)}"
-        [[ ${#os_top} -gt 35 ]] && os_top="${os_top:0:32}..."
-        os_top=$(echo "$os_top" | cut -d',' -f1)
+        local hostname os_top open_count=0
+        hostname="${HOST_RESOLVED_NAME[$ip]}"
+        os_top="${HOST_RESOLVED_OS[$ip]:-(unknown)}"
+        [[ ${#os_top} -gt 40 ]] && os_top="${os_top:0:37}..."
 
         mapfile -t open_arr < <(get_open_ports "$ip")
         open_count=${#open_arr[@]}
@@ -1434,7 +1488,11 @@ display_summary() {
         ((total_vulns += vcount))
 
         rprint ""
-        rprint "  HOST    : ${ip}$( [[ -n "$hostname" ]] && echo " (${hostname})" )"
+        if [[ -n "$hostname" ]]; then
+            rprint "  HOST    : ${ip}  (${hostname})"
+        else
+            rprint "  HOST    : ${ip}"
+        fi
         rprint "  OS      : ${os_top}"
         rprint "  PORTS   : ${open_count} open"
         if [[ $vcount -gt 0 ]]; then
