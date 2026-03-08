@@ -1,0 +1,5 @@
+*.nmap
+*.gnmap
+*.xml
+/tmp/
+scan_*
