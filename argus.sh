@@ -23,7 +23,7 @@ VULN_N="$SCAN_TMP/vuln.nmap"     # vuln-script normal output
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 TARGET=""; PORTS=""; NO_VULN=0; NO_HPING=0; NO_ENUM=0; ADD_HOSTS=0
-TIMING="4"; OUTPUT=""; VERBOSE=0; NO_UDP=0; DO_SEARCHSPLOIT=0
+TIMING="4"; OUTPUT=""; VERBOSE=0; NO_UDP=1; DO_SEARCHSPLOIT=0
 CRED_USER=""; CRED_PASS=""
 
 # ── Per-host cache (populated during display, reused in summary) ──────────────
@@ -148,7 +148,7 @@ usage() {
     echo -e "  ${CYAN}--no-vuln${RESET}      Skip vulnerability scripts (faster)"
     echo -e "  ${CYAN}--no-hping${RESET}     Skip hping3 probes"
     echo -e "  ${CYAN}--no-enum${RESET}      Skip extra enumeration (NFS, rsync, Redis, etc.)"
-    echo -e "  ${CYAN}--no-udp${RESET}          Skip UDP scan (SNMP/TFTP/DNS)"
+    echo -e "  ${CYAN}--udp${RESET}             Enable UDP scan (SNMP/TFTP/DNS/NTP — slower)"
     echo -e "  ${CYAN}--add-hosts${RESET}       Auto-add discovered hostname to /etc/hosts"
     echo -e "  ${CYAN}--searchsploit${RESET}    Run searchsploit against all detected service versions"
     echo -e "  ${CYAN}-U${RESET}  <user>        Username for authenticated enumeration"
@@ -174,7 +174,7 @@ while [[ $# -gt 0 ]]; do
         --no-vuln)  NO_VULN=1;    shift   ;;
         --no-hping) NO_HPING=1;   shift   ;;
         --no-enum)  NO_ENUM=1;    shift   ;;
-        --no-udp)      NO_UDP=1;          shift   ;;
+        --udp)         NO_UDP=0;          shift   ;;
         --add-hosts)   ADD_HOSTS=1;       shift   ;;
         --searchsploit)DO_SEARCHSPLOIT=1; shift   ;;
         -U|--user)     CRED_USER="$2";    shift 2 ;;
